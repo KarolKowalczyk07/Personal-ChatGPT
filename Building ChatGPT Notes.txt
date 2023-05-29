@@ -1,0 +1,58 @@
+ChatGPT is a NLP model as it models a sequence of words or characters or tokens and knows how words follow each other in English.
+It is completing the sequencing given a prompt (start of sequence).
+
+Tiny Shapeskeare dataset- concatenation/combination of all Shakespeare works
+Model will output next character given a prompt text, of what's likely to be said next on a token (word-chunk/character) level
+most used tokens are sub-word level or word chunks, can have very long sequence of integers with small vocabularies, or short sequence of integers with large vocabularies
+for this we'll use character-level tokenizer
+
+take text, encode it into integers, and wrap it as a tensor
+take first 90% of data for training, and last 10% for validation
+we're not feeding all the data into transformer at once (computationally intense), we sample random level chunks (mini batches)
+maximum length of a chunk/batch is block_size, and it's a group of consecutive tokens
+when you train, it is predicting the next token at the end of each mini-batch (random consecutive characters)
+in a list of 9 characters, 8 individual predictions come out
+this also gives transformer experience of seeing context from 1 token all the way up to block_size, we'd like transformer to get used to seeing everything in between
+parallel process batches at once using gpu's
+
+ix = random position to grab chunk out of, generate batch_size # of random offsets between len(data) - block_size
+token_embedding_table is used to get next token, it is a nn.Embedding is a very thing wrapper around a tensor of shape(vocab_size, vocab_size)
+when you pass idx to it, every integer in input refers to table and pluck out a row of it corresponding to its index
+eg. 'b' -> 43 (encoded), plucks out 43rd row of table, and pytorch arranges this by batch, time, channel (B,T,C) tensor
+interpret this a logits (scores) for next character of sequence
+pytorch.cross_entropy documentation wants minibatch, channels, etc.. or B, C, T not B, T, C, so we need to reshape logits into 2D, (B*T, C) can also do (-1, C) which pytorch will guess what -1 is, but instead we can be explicit and specify B*T
+
+generate function uses idx (current position of token in a batch, (B, T) array of indices) and extends it in all batch dimensions in time dimension until max_new_tokens
+whatever is predicted is concatenated onto previous idx along 1st dimension (Time/T) to create (B, T+1) and becomes new idx
+it plucks out last element in time dimension (B, -1, C) which is next prediction, convert logits to probabilities using softmax and use torch.multinomial to sample from probabilities and ask to get 1 sample, so idx_next becomes (B, 1), in each batch dim we have a single prediction for what comes next, then concatenate idx_next
+initialize idx with new line character (0) in a (1,1) tensor, feed it into generate and ask for 100 new tokens (100 iterations) and because generate works on batches, we have to index onto 0th row to unpluck batch dim which gives timesteps (1d tensor of indices), convert it to list, and decode it, which converts integers/tokens into text
+
+use gpa ('cuda') if one is present, if it is, have to load data onto that device and move model parameters to device
+network will behave the same (same layers) in training and evaluation (no dropout, batch layers), but can be edited (think what mode/layers you'd want at training vs inference time)
+context manager @torch.no_grad tells pytorch everything inside of the function will not call .backward(), so pytorch can be a lot more efficient in its memory use as it doesn't have to store the intermediate variables used for calling backward(), this is very good practice/habit to use.
+
+we have 8 tokens in a batch, and we'd like them to talk to each other (or coupled), they should only talk to previous tokens as they don't know predicted/future tokens
+take an average of all the preceeding tokens (this loses info about spatial arrangement, but it's okay for now)
+
+Residual Networks
+deep neural networks have a hard time optimizing, which residual networks are used for
+transform data, have skip connection with addition from previous features, can fork off from residual pathway and comeback via addition
+during back propagation, addition distributes gradients equally to both of its branches that fed as the input
+supervision or gradients from loss hop through every addition node all the way to input and also fork off into residual blocks
+residual blocks are usually initialized in the beginning so they contribute very little to the residual pathway
+so in the beginning they're almost invisible, but during optimization they come online over time
+at initialization you can go directly from supervision to input, gradient is unimpeded or flows, and blocks over time kick in (helps to optimize)
+
+There are 2 stages to training ChatGPT: Pre-training and fine-tuning
+
+Pre-training - training on a large chunk of internet to get decoder (nano-gpt focuses on this stage)
+our transformer (shakespeare) has about 10 million parameters, dataset is ~1 million characters/tokens
+OpenAI use sub-word tokens and has ~50,000 of them, this shakespeare one would have ~300,000 of these
+architecture is similar to ours, however, it would use 1000's of GPU's talking to each other to train ~175 billion parameter GPT-3
+after this stage, it is a document (sequence) completer based off the internet, it babbles (eg. could answer question with more questions, undefined behavior)
+
+Fine-tuning - align it to our system / wanted outcomes
+step 1: have large # of documents (1000's) where question is on top and answer is below, fine-tune model to focus on these documents so it'll expect this format
+step 2: let model respond, and rate/rank the respones with real people for a reward model, how desired is a response
+step 3: run PPO (proximal policy optimization, RL gradient optimizer) to fine-tune sampling policy, answers from model should have a high reward according to reward model
+PPO aims to update the policy parameters in a way that maximizes the expected reward while ensuring that the policy changes are not too drastic to disrupt the learning process (tries to balance exploration and exploitation during training)
